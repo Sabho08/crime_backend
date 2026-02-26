@@ -65,9 +65,10 @@ def train_model(df):
     model.fit(X, y)
     
     # Save model and encoder
-    joblib.dump(model, 'risk_model.joblib')
-    joblib.dump(le_tod, 'tod_encoder.joblib')
-    print("Model trained and saved.")
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    joblib.dump(model, os.path.join(base_dir, 'risk_model.joblib'))
+    joblib.dump(le_tod, os.path.join(base_dir, 'tod_encoder.joblib'))
+    print(f"Model trained and saved to {base_dir}")
     return df
 
 def get_hotspots_data(df):

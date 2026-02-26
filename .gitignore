@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+*$py.class
+.env
+.venv
+env/
+venv/
+ENV/
+*.log
+risk_model.joblib
+tod_encoder.joblib
+crime_data.csv

@@ -17,9 +17,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-DATA_FILE = "crime_data.csv"
-MODEL_FILE = "risk_model.joblib"
-ENCODER_FILE = "tod_encoder.joblib"
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DATA_FILE = os.path.join(BASE_DIR, "crime_data.csv")
+MODEL_FILE = os.path.join(BASE_DIR, "risk_model.joblib")
+ENCODER_FILE = os.path.join(BASE_DIR, "tod_encoder.joblib")
 
 class PredictionRequest(BaseModel):
     latitude: float
@@ -48,7 +49,7 @@ def startup_event():
 @app.get("/hotspots")
 def get_hotspots():
     df = load_data()
-    return get_hotspots_data(df)
+    return pd.DataFrame(get_hotspots_data(df)).fillna(0).to_dict(orient='records')
 
 @app.get("/bns-stats")
 def get_bns_stats():
@@ -60,7 +61,7 @@ def get_bns_stats():
 @app.get("/predictive-zones")
 def get_predictive_zones():
     df = load_data()
-    return get_predictive_zones_data(df)
+    return pd.DataFrame(get_predictive_zones_data(df)).fillna(0).to_dict(orient='records')
 
 @app.get("/firs")
 def get_firs():
@@ -68,7 +69,7 @@ def get_firs():
     # Add a synthetic status and risk for the table
     df['Status'] = df['BNS_Section'].apply(lambda x: 'Inquiry' if x % 2 == 0 else 'Arrested')
     df['Risk'] = df['Dist_to_PS'].apply(lambda x: 'High' if x > 3 else 'Medium' if x > 1.5 else 'Low')
-    return df.to_dict(orient='records')
+    return df.fillna("Unknown").to_dict(orient='records')
 
 @app.post("/predict")
 def predict_risk(req: PredictionRequest):
@@ -94,4 +95,6 @@ def predict_risk(req: PredictionRequest):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    # Use PORT environment variable if available (e.g., for Render/Heroku)
+    port = int(os.environ.get("PORT", 8000))
+    uvicorn.run(app, host="0.0.0.0", port=port)
