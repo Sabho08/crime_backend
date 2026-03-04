@@ -18,7 +18,9 @@ app.add_middleware(
 )
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DATA_FILE = os.path.join(BASE_DIR, "crime_data.csv")
+DATA_FILE = os.path.join(BASE_DIR, "crime_data_updated.csv")
+if not os.path.exists(DATA_FILE):
+    DATA_FILE = os.path.join(BASE_DIR, "crime_data.csv")
 MODEL_FILE = os.path.join(BASE_DIR, "risk_model.joblib")
 ENCODER_FILE = os.path.join(BASE_DIR, "tod_encoder.joblib")
 
@@ -27,6 +29,13 @@ class PredictionRequest(BaseModel):
     longitude: float
     time_of_day: str  # 'Morning', 'Afternoon', 'Evening', 'Night'
     dist_to_ps: float
+
+class ReportRequest(BaseModel):
+    latitude: float
+    longitude: float
+    crime_type: str
+    description: str
+    time: str # ISO format or string
 
 def load_data():
     if not os.path.exists(DATA_FILE):
@@ -92,6 +101,68 @@ def predict_risk(req: PredictionRequest):
         "longitude": req.longitude,
         "risk_score": round(float(risk_score), 2)
     }
+
+@app.post("/report")
+def report_crime(req: ReportRequest):
+    try:
+        df = load_data()
+        
+        # Simple Time_of_Day logic
+        try:
+            from datetime import datetime
+            dt = datetime.fromisoformat(req.time.replace('Z', '+00:00'))
+            hour = dt.hour
+            if 5 <= hour < 12: tod = 'Morning'
+            elif 12 <= hour < 17: tod = 'Afternoon'
+            elif 17 <= hour < 21: tod = 'Evening'
+            else: tod = 'Night'
+        except:
+            tod = 'Night'
+
+        # Map crime_type to BNS (Simplified)
+        bns_map = {'Theft': 303, 'Robbery': 309, 'Assault': 115, 'Harassment': 74, 'Nuisance': 126}
+        bns = bns_map.get(req.crime_type, 303)
+
+        # Create row exactly matching the CSV header order
+        # FIR_UID,BNS_Section,Crime_Type,Timestamp,Time_of_Day,Latitude,Longitude,Dist_to_PS,
+        # Area_Type,Area_Zone,Crime_Frequency,Target,Place,Event,Relation,Lighting,CCTV,
+        # Modus_Operandi,Weather,Response_Time_Mins,Patrol_Frequency
+        new_row_list = [
+            f'CIT-2026-{len(df) + 1}', # FIR_UID
+            bns,                       # BNS_Section
+            req.crime_type,            # Crime_Type
+            req.time,                  # Timestamp
+            tod,                       # Time_of_Day
+            req.latitude,              # Latitude
+            req.longitude,             # Longitude
+            1.0,                       # Dist_to_PS
+            "Urban",                   # Area_Type
+            "Residential",             # Area_Zone
+            "Low",                     # Crime_Frequency
+            "Adult",                   # Target
+            "Street",                  # Place
+            "None",                    # Event
+            "Stranger",                # Relation
+            "Well Lit",                # Lighting
+            "No",                      # CCTV
+            "Unknown",                 # Modus_Operandi
+            "Clear",                   # Weather
+            0,                         # Response_Time_Mins
+            "None",                    # Patrol_Frequency
+            req.description            # Description
+        ]
+        
+        # Append to the CSV as a single line
+        import csv
+        with open(DATA_FILE, 'a', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow(new_row_list)
+            
+        return {"status": "success", "message": "Incident reported successfully."}
+    except Exception as e:
+        import traceback
+        print(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":
     import uvicorn
