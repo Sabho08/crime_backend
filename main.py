@@ -4,7 +4,12 @@ from pydantic import BaseModel
 import pandas as pd
 import joblib
 import os
+from dotenv import load_dotenv
+from pymongo import MongoClient
 from analysis import get_hotspots_data, get_bns_stats_data, train_model, get_predictive_zones_data
+
+# Load environment variables from .env file
+load_dotenv()
 
 app = FastAPI(title="Urban Crime Pattern Recognition System")
 
@@ -18,11 +23,17 @@ app.add_middleware(
 )
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DATA_FILE = os.path.join(BASE_DIR, "crime_data_updated.csv")
-if not os.path.exists(DATA_FILE):
-    DATA_FILE = os.path.join(BASE_DIR, "crime_data.csv")
 MODEL_FILE = os.path.join(BASE_DIR, "risk_model.joblib")
 ENCODER_FILE = os.path.join(BASE_DIR, "tod_encoder.joblib")
+
+# MongoDB Configuration
+MONGO_URI = os.environ.get("MONGO_URI", "mongodb://localhost:27017/")
+DB_NAME = "crime_db"
+COLLECTION_NAME = "crime_incidents"
+
+client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000)
+db = client[DB_NAME]
+collection = db[COLLECTION_NAME]
 
 class PredictionRequest(BaseModel):
     latitude: float
@@ -36,24 +47,47 @@ class ReportRequest(BaseModel):
     crime_type: str
     description: str
     time: str # ISO format or string
+    # Multi-Vector Ingestion Fields (Matches PDF Slide 5)
+    lighting: str = "Unknown"  # 'Well Lit', 'Dim', 'Dark', 'CCTV Shadow'
+    cctv: str = "Unknown"      # 'Yes', 'No', 'Blind Spot'
+    weapon: str = "None"       # 'None', 'Firearm', 'Blunt Object', 'Sharp Object'
+    victim_count: int = 1
 
 def load_data():
-    if not os.path.exists(DATA_FILE):
-        raise FileNotFoundError("Crime data not found. Please run data_gen.py first.")
-    return pd.read_csv(DATA_FILE)
+    try:
+        cursor = collection.find({}, {'_id': False})
+        df = pd.DataFrame(list(cursor))
+        if df.empty:
+             raise HTTPException(status_code=500, detail="No crime data found in database.")
+        return df
+    except Exception as e:
+        print(f"Error loading data from MongoDB: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.on_event("startup")
 def startup_event():
-    # Generate data and train model if not present
-    if not os.path.exists(DATA_FILE):
-        print("Generating synthetic data...")
-        import data_gen
-        data_gen.generate_crime_data()
-    
-    df = load_data()
-    if not os.path.exists(MODEL_FILE):
-        print("Training risk prediction model...")
-        train_model(df)
+    # If DB is empty, try to import from CSV first
+    try:
+        # Check if connected
+        client.admin.command('ping')
+        if collection.count_documents({}) == 0:
+            print("Database empty. Attempting to import from CSV...")
+            try:
+                import import_to_mongodb
+                import_to_mongodb.import_csv_to_mongo()
+            except Exception as e:
+                print(f"Failed to auto-import CSV: {e}")
+        
+        try:
+            df = load_data()
+            if not os.path.exists(MODEL_FILE):
+                print("Training risk prediction model...")
+                train_model(df)
+        except Exception as e:
+            print(f"Startup error: {e}")
+    except Exception as e:
+        print(f"Failed to connect to MongoDB: {e}")
+        print("\nTip: If you're using MongoDB Atlas, ensure your IP address is whitelisted in the Atlas Network Access settings.")
 
 @app.get("/hotspots")
 def get_hotspots():
@@ -64,7 +98,6 @@ def get_hotspots():
 def get_bns_stats():
     df = load_data()
     stats = get_bns_stats_data(df)
-    # Convert keys to string for JSON compatibility if they are integers
     return {str(k): v for k, v in stats.items()}
 
 @app.get("/predictive-zones")
@@ -75,7 +108,6 @@ def get_predictive_zones():
 @app.get("/firs")
 def get_firs():
     df = load_data()
-    # Add a synthetic status and risk for the table
     df['Status'] = df['BNS_Section'].apply(lambda x: 'Inquiry' if x % 2 == 0 else 'Arrested')
     df['Risk'] = df['Dist_to_PS'].apply(lambda x: 'High' if x > 3 else 'Medium' if x > 1.5 else 'Low')
     return df.fillna("Unknown").to_dict(orient='records')
@@ -105,8 +137,6 @@ def predict_risk(req: PredictionRequest):
 @app.post("/report")
 def report_crime(req: ReportRequest):
     try:
-        df = load_data()
-        
         # Simple Time_of_Day logic
         try:
             from datetime import datetime
@@ -119,53 +149,70 @@ def report_crime(req: ReportRequest):
         except:
             tod = 'Night'
 
-        # Map crime_type to BNS (Simplified)
         bns_map = {'Theft': 303, 'Robbery': 309, 'Assault': 115, 'Harassment': 74, 'Nuisance': 126}
         bns = bns_map.get(req.crime_type, 303)
 
-        # Create row exactly matching the CSV header order
-        # FIR_UID,BNS_Section,Crime_Type,Timestamp,Time_of_Day,Latitude,Longitude,Dist_to_PS,
-        # Area_Type,Area_Zone,Crime_Frequency,Target,Place,Event,Relation,Lighting,CCTV,
-        # Modus_Operandi,Weather,Response_Time_Mins,Patrol_Frequency
-        new_row_list = [
-            f'CIT-2026-{len(df) + 1}', # FIR_UID
-            bns,                       # BNS_Section
-            req.crime_type,            # Crime_Type
-            req.time,                  # Timestamp
-            tod,                       # Time_of_Day
-            req.latitude,              # Latitude
-            req.longitude,             # Longitude
-            1.0,                       # Dist_to_PS
-            "Urban",                   # Area_Type
-            "Residential",             # Area_Zone
-            "Low",                     # Crime_Frequency
-            "Adult",                   # Target
-            "Street",                  # Place
-            "None",                    # Event
-            "Stranger",                # Relation
-            "Well Lit",                # Lighting
-            "No",                      # CCTV
-            "Unknown",                 # Modus_Operandi
-            "Clear",                   # Weather
-            0,                         # Response_Time_Mins
-            "None",                    # Patrol_Frequency
-            req.description            # Description
-        ]
+        count = collection.count_documents({})
         
-        # Append to the CSV as a single line
-        import csv
-        with open(DATA_FILE, 'a', newline='') as f:
-            writer = csv.writer(f)
-            writer.writerow(new_row_list)
+        new_doc = {
+            'FIR_UID': f'CIT-2026-{count + 1}',
+            'BNS_Section': bns,
+            'Crime_Type': req.crime_type,
+            'Timestamp': req.time,
+            'Time_of_Day': tod,
+            'Latitude': req.latitude,
+            'Longitude': req.longitude,
+            'Dist_to_PS': 1.0,
+            'Area_Type': "Urban",
+            'Area_Zone': "Residential",
+            'Crime_Frequency': "Low",
+            'Target': "Adult",
+            'Place': "Street",
+            'Event': "None",
+            'Relation': "Stranger",
+            'Lighting': "Well Lit",
+            'CCTV': "No",
+            'Modus_Operandi': "Unknown",
+            'Weather': "Clear",
+            'Response_Time_Mins': 0,
+            'Patrol_Frequency': "None",
+            'Description': req.description
+        }
+        
+        collection.insert_one(new_doc)
+        
+        is_organized_crime = (bns == 111)
             
-        return {"status": "success", "message": "Incident reported successfully."}
+        return {
+            "status": "success", 
+            "message": "Incident reported successfully.",
+            "flag_nia": is_organized_crime,
+            "bns_details": f"Section {bns} - {req.crime_type}"
+        }
     except Exception as e:
         import traceback
         print(traceback.format_exc())
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.get("/deterrence-advisories")
+def get_deterrence_advisories():
+    df = load_data()
+    hotspots = get_hotspots_data(df)
+    
+    advisories = []
+    for h in hotspots[:5]:
+        risk = h.get('Risk_Score', 0)
+        patrol_freq = "High (Hourly)" if risk > 15 else "Medium (2-4 hours)"
+        advisories.append({
+            "location": [h['Latitude'], h['Longitude']],
+            "risk_score": round(risk, 2),
+            "patrol_frequency": patrol_freq,
+            "checkpoint_recommended": risk > 18,
+            "advisory": f"Concentrate police presence in {patrol_freq} intervals due to high {h['Crime_Type'] if 'Crime_Type' in h else 'crime'} patterns."
+        })
+    return advisories
+
 if __name__ == "__main__":
     import uvicorn
-    # Use PORT environment variable if available (e.g., for Render/Heroku)
     port = int(os.environ.get("PORT", 8000))
     uvicorn.run(app, host="0.0.0.0", port=port)
